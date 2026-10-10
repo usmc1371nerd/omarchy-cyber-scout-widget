@@ -13,7 +13,7 @@ import uuid
 from .models import Observation, is_locally_administered
 
 DEFAULT_DATABASE = Path.home() / ".local" / "share" / "cyber-scout" / "cyber-scout.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEVICE_CATEGORIES = {
     "Computer", "Phone", "Tablet", "Server", "Router", "Switch", "Printer",
     "Television", "Smart home / IoT", "Gaming console", "Unknown",
@@ -161,6 +161,41 @@ CREATE INDEX idx_scan_jobs_status_created ON scan_jobs(status, created_at);
 CREATE INDEX idx_scan_jobs_created ON scan_jobs(created_at DESC);
 """
 
+MIGRATION_4 = """
+CREATE TABLE sensor_findings (
+    id INTEGER PRIMARY KEY,
+    sensor TEXT NOT NULL CHECK (sensor IN ('zeek','suricata')),
+    external_id TEXT NOT NULL,
+    record_type TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('info','review','higher')),
+    summary TEXT NOT NULL,
+    first_observed INTEGER NOT NULL,
+    last_observed INTEGER NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1 CHECK (occurrences >= 1),
+    source_ip TEXT,
+    source_port INTEGER,
+    destination_ip TEXT,
+    destination_port INTEGER,
+    protocol TEXT,
+    device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(sensor, external_id)
+);
+CREATE TABLE sensor_cursors (
+    path TEXT PRIMARY KEY,
+    sensor TEXT NOT NULL CHECK (sensor IN ('zeek','suricata')),
+    inode INTEGER NOT NULL,
+    offset INTEGER NOT NULL CHECK (offset >= 0),
+    last_read INTEGER NOT NULL,
+    records_read INTEGER NOT NULL DEFAULT 0,
+    parse_errors INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+CREATE INDEX idx_sensor_findings_last ON sensor_findings(last_observed DESC);
+CREATE INDEX idx_sensor_findings_device ON sensor_findings(device_id,last_observed DESC);
+CREATE INDEX idx_sensor_findings_severity ON sensor_findings(severity,last_observed DESC);
+"""
+
 
 class InventoryStore:
     def __init__(self, path: Path | str = DEFAULT_DATABASE) -> None:
@@ -209,6 +244,11 @@ class InventoryStore:
             with self.connection:
                 self.connection.executescript(MIGRATION_3)
                 self.connection.execute("PRAGMA user_version = 3")
+            version = 3
+        if version < 4:
+            with self.connection:
+                self.connection.executescript(MIGRATION_4)
+                self.connection.execute("PRAGMA user_version = 4")
 
     def _create_device(self, observation: Observation) -> str:
         device_id = str(uuid.uuid4())
@@ -651,7 +691,116 @@ class InventoryStore:
             for table, column in (("observations", "observed_at"), ("events", "occurred_at")):
                 cursor = self.connection.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
                 removed[table] = cursor.rowcount
+            cursor = self.connection.execute("DELETE FROM sensor_findings WHERE last_observed < ?", (cutoff,))
+            removed["sensor_findings"] = cursor.rowcount
         return removed
+
+    def record_sensor_finding(self, finding: dict) -> dict:
+        sensor = str(finding.get("sensor", ""))
+        if sensor not in {"zeek", "suricata"}:
+            raise ValueError("Invalid sensor")
+        external_id = self._clean_text(str(finding.get("external_id", "")), maximum=256,
+                                       field="Sensor ID", allow_empty=False)
+        record_type = self._clean_text(str(finding.get("record_type", "")), maximum=64,
+                                       field="Record type", allow_empty=False)
+        severity = str(finding.get("severity", "info"))
+        if severity not in {"info", "review", "higher"}:
+            raise ValueError("Invalid sensor severity")
+        summary = self._clean_text(str(finding.get("summary", "")), maximum=512,
+                                   field="Summary", allow_empty=False)
+        observed_at = int(finding.get("observed_at") or time.time())
+        source_ip = finding.get("source_ip")
+        destination_ip = finding.get("destination_ip")
+        for value in (source_ip, destination_ip):
+            if value is not None:
+                ipaddress.ip_address(str(value))
+        source_port = int(finding["source_port"]) if finding.get("source_port") is not None else None
+        destination_port = int(finding["destination_port"]) if finding.get("destination_port") is not None else None
+        if any(value is not None and not 0 <= value <= 65535 for value in (source_port, destination_port)):
+            raise ValueError("Invalid sensor port")
+        protocol = str(finding.get("protocol") or "").lower()[:16] or None
+        details = finding.get("details") if isinstance(finding.get("details"), dict) else {}
+        details_json = json.dumps(details, separators=(",", ":"), ensure_ascii=False)
+        if len(details_json.encode()) > 16384:
+            raise ValueError("Sensor details are too large")
+        device_row = None
+        for address in (source_ip, destination_ip):
+            if address:
+                device_row = self.connection.execute(
+                    "SELECT device_id FROM addresses WHERE address=? ORDER BY last_observed DESC LIMIT 1",
+                    (str(address),),
+                ).fetchone()
+                if device_row:
+                    break
+        device_id = str(device_row["device_id"]) if device_row else None
+        existed = self.connection.execute(
+            "SELECT id FROM sensor_findings WHERE sensor=? AND external_id=?", (sensor, external_id)
+        ).fetchone()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO sensor_findings
+                   (sensor,external_id,record_type,severity,summary,first_observed,last_observed,
+                    source_ip,source_port,destination_ip,destination_port,protocol,device_id,details_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(sensor,external_id) DO UPDATE SET
+                     severity=excluded.severity,summary=excluded.summary,
+                     last_observed=MAX(last_observed,excluded.last_observed),
+                     occurrences=occurrences+1,device_id=COALESCE(device_id,excluded.device_id),
+                     details_json=excluded.details_json""",
+                (sensor, external_id, record_type, severity, summary, observed_at, observed_at,
+                 source_ip, source_port, destination_ip, destination_port, protocol, device_id, details_json),
+            )
+            if not existed and record_type in {"alert", "notice"}:
+                self._record_event(
+                    device_id, observed_at, f"sensor.{sensor}.{record_type}", summary, details,
+                    f"sensor:{sensor}:{external_id}", debounce_seconds=315360000,
+                )
+        row = self.connection.execute(
+            "SELECT * FROM sensor_findings WHERE sensor=? AND external_id=?", (sensor, external_id)
+        ).fetchone()
+        return self._decode_sensor_finding(row)
+
+    @staticmethod
+    def _decode_sensor_finding(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item.pop("details_json"))
+        except (json.JSONDecodeError, TypeError):
+            item["details"] = {}
+        return item
+
+    def list_sensor_findings(self, *, since: int = 0, limit: int = 250) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT * FROM sensor_findings WHERE last_observed>=? ORDER BY last_observed DESC,id DESC LIMIT ?",
+            (int(since), max(1, min(int(limit), 1000))),
+        )
+        return [self._decode_sensor_finding(row) for row in rows]
+
+    def get_sensor_cursor(self, path: str) -> dict | None:
+        row = self.connection.execute("SELECT * FROM sensor_cursors WHERE path=?", (path,)).fetchone()
+        return dict(row) if row else None
+
+    def update_sensor_cursor(self, path: str, sensor: str, inode: int, offset: int, *,
+                             records_read: int = 0, parse_errors: int = 0,
+                             error: str | None = None, now: int | None = None) -> None:
+        if sensor not in {"zeek", "suricata"}:
+            raise ValueError("Invalid sensor")
+        timestamp = int(now if now is not None else time.time())
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO sensor_cursors(path,sensor,inode,offset,last_read,records_read,parse_errors,error)
+                   VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET sensor=excluded.sensor,
+                   inode=excluded.inode,offset=excluded.offset,last_read=excluded.last_read,
+                   records_read=records_read+excluded.records_read,
+                   parse_errors=parse_errors+excluded.parse_errors,error=excluded.error""",
+                (path, sensor, int(inode), max(0, int(offset)), timestamp, max(0, int(records_read)),
+                 max(0, int(parse_errors)), str(error)[:512] if error else None),
+            )
+
+    def list_sensor_status(self) -> list[dict]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM sensor_cursors ORDER BY sensor,path"
+        )]
 
     def keep_only_networks(self, networks: list[str]) -> dict[str, int]:
         """Destructively remove inventory evidence outside approved IPv4 LANs."""

@@ -16,6 +16,7 @@ from .config import ConfigManager
 from .database import DEFAULT_DATABASE, InventoryStore
 from .discovery import NeighborEventAdapter, PassiveDiscoveryManager
 from .scheduling import approved_local_scan_targets
+from .sensors import SensorLogIngestor
 
 DEFAULT_LOCK = Path.home() / ".cache" / "cyber-scout" / "passive-monitor.lock"
 
@@ -60,6 +61,7 @@ def run(*, once: bool = False, config_path: str | None = None, database_path: st
         with InventoryStore(database_path or DEFAULT_DATABASE) as store:
             manager = PassiveDiscoveryManager(store)
             result = manager.observe_once()
+            result["sensors"] = SensorLogIngestor(store).ingest_configured(config)
             result["retention"] = store.prune(config.retention_days)
             result["scheduledScansQueued"] = enqueue_due_scheduled_scans(store, config)
             print(json.dumps(result, separators=(",", ":")), flush=True)
@@ -109,6 +111,7 @@ def run(*, once: bool = False, config_path: str | None = None, database_path: st
 
                     if time.monotonic() >= next_snapshot:
                         result = manager.observe_once()
+                        result["sensors"] = SensorLogIngestor(store).ingest_configured(config)
                         result["retention"] = store.prune(config.retention_days)
                         result["scheduledScansQueued"] = enqueue_due_scheduled_scans(store, config)
                         print(json.dumps(result, separators=(",", ":")), flush=True)

@@ -151,6 +151,15 @@ def make_handler(database: Path | str = DEFAULT_DATABASE,
                             raise ValueError("Invalid event state")
                         self._json({"networks": networks, "scope": scope, "events": events[:250]})
                         return
+                    if request.path == "/api/sensors":
+                        since = int(query.get("since", [str(int(time.time()) - 604800)])[0])
+                        self._json({
+                            "status": store.list_sensor_status(),
+                            "findings": store.list_sensor_findings(since=since, limit=250),
+                            "visibility": "Sensor data covers only traffic delivered to this host. Full-LAN visibility requires a mirror port, network tap, or gateway sensor.",
+                            "packetPayloadStored": False,
+                        })
+                        return
                     if request.path.startswith("/api/devices/"):
                         device_id = request.path.removeprefix("/api/devices/")
                         if not device_id or "/" in device_id or len(device_id) > 64:
@@ -199,7 +208,8 @@ def make_handler(database: Path | str = DEFAULT_DATABASE,
                     return
                 if request.path == "/api/settings":
                     allowed = {"retention_days", "active_discovery_enabled", "approved_networks",
-                               "active_rate_limit", "active_timeout_seconds", "scheduled_scan_minutes"}
+                               "active_rate_limit", "active_timeout_seconds", "scheduled_scan_minutes",
+                               "zeek_log_directory", "suricata_eve_path"}
                     if set(body) - allowed:
                         raise ValueError("Unsupported setting")
                     manager = ConfigManager(config_path)

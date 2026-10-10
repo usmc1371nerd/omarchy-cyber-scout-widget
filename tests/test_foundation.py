@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from cyber_scout.config import ConfigManager, CyberScoutConfig
@@ -12,6 +13,7 @@ from cyber_scout import jobs
 from cyber_scout.scheduling import approved_local_scan_targets
 from cyber_scout.models import Observation, is_locally_administered, normalize_mac
 from cyber_scout.scope import current_ipv4_scopes
+from cyber_scout.sensors import SensorLogIngestor, parse_suricata_eve, parse_zeek_json
 
 
 def test_mac_normalization_and_randomized_detection() -> None:
@@ -454,3 +456,79 @@ def test_dashboard_period_and_history_are_explicit(tmp_path) -> None:
         assert current["counts"]["total"] == 0
         assert history["counts"]["total"] == 1
         assert history["period"] == "7d"
+
+
+def test_zeek_json_parser_keeps_metadata_not_payload() -> None:
+    finding = parse_zeek_json({
+        "ts": 1_700_000_000.5, "uid": "C1", "id.orig_h": "192.168.1.20",
+        "id.orig_p": 50123, "id.resp_h": "192.168.1.1", "id.resp_p": 443,
+        "proto": "tcp", "service": "ssl", "conn_state": "SF",
+        "payload": "must-not-be-stored",
+    })
+    assert finding["record_type"] == "connection"
+    assert finding["external_id"] == "connection:C1"
+    assert finding["details"]["service"] == "ssl"
+    assert "payload" not in json.dumps(finding)
+
+
+def test_suricata_alert_parser_is_bounded_and_payload_free() -> None:
+    finding = parse_suricata_eve({
+        "timestamp": "2026-10-09T20:00:00+00:00", "event_type": "alert", "flow_id": 42,
+        "src_ip": "192.168.1.20", "src_port": 51515, "dest_ip": "192.168.1.1",
+        "dest_port": 53, "proto": "UDP",
+        "alert": {"signature_id": 1001, "signature": "Test alert", "severity": 1,
+                  "category": "Test", "action": "allowed"},
+        "payload_printable": "must-not-be-stored",
+    })
+    assert finding["severity"] == "higher"
+    assert finding["summary"] == "Test alert"
+    assert finding["details"]["action"] == "allowed"
+    assert "payload" not in json.dumps(finding)
+
+
+def test_sensor_ingestion_tracks_cursor_and_deduplicates_alerts(tmp_path) -> None:
+    path = tmp_path / "eve.json"
+    alert = {
+        "timestamp": "2026-10-09T20:00:00+00:00", "event_type": "alert", "flow_id": 42,
+        "src_ip": "192.168.1.20", "src_port": 51515, "dest_ip": "192.168.1.1",
+        "dest_port": 53, "proto": "UDP",
+        "alert": {"signature_id": 1001, "signature": "Test alert", "severity": 2},
+    }
+    path.write_text(json.dumps(alert) + "\n" + json.dumps(alert) + "\n")
+    with InventoryStore(tmp_path / "inventory.db") as store:
+        store.ingest(Observation(
+            "neighbor_table", "eth0", "192.168.1.20", "00:11:22:33:44:55", observed_at=100,
+        ))
+        ingestor = SensorLogIngestor(store)
+        first = ingestor.ingest_file(path, "suricata", parse_suricata_eve)
+        second = ingestor.ingest_file(path, "suricata", parse_suricata_eve)
+        findings = store.list_sensor_findings()
+        assert first["records"] == 2
+        assert first["duplicates"] == 1
+        assert second["records"] == 0
+        assert findings[0]["occurrences"] == 2
+        assert findings[0]["device_id"] is not None
+        assert store.list_sensor_status()[0]["records_read"] == 2
+        assert sum(event["event_type"] == "sensor.suricata.alert" for event in store.list_events()) == 1
+
+
+def test_sensor_ingestion_waits_for_complete_json_line(tmp_path) -> None:
+    path = tmp_path / "conn.log"
+    item = {"ts": 100, "uid": "C1", "id.orig_h": "10.0.0.2", "id.resp_h": "10.0.0.1"}
+    encoded = json.dumps(item)
+    path.write_text(encoded)
+    with InventoryStore(tmp_path / "inventory.db") as store:
+        ingestor = SensorLogIngestor(store)
+        assert ingestor.ingest_file(path, "zeek", parse_zeek_json)["records"] == 0
+        path.write_text(encoded + "\n")
+        assert ingestor.ingest_file(path, "zeek", parse_zeek_json)["records"] == 1
+
+
+def test_sensor_retention_removes_old_findings(tmp_path) -> None:
+    with InventoryStore(tmp_path / "inventory.db") as store:
+        store.record_sensor_finding({
+            "sensor": "zeek", "external_id": "notice:1", "record_type": "notice",
+            "severity": "review", "summary": "Old notice", "observed_at": 100,
+        })
+        removed = store.prune(1, now=200000)
+        assert removed["sensor_findings"] == 1
