@@ -14,6 +14,7 @@ from .database import DEFAULT_DATABASE, InventoryStore
 from .config import ConfigManager
 from .diagnostics import explain_open_port, summarize_findings
 from .discovery import PassiveDiscoveryManager
+from .runtime import runtime_logger
 
 WORKER_LOCK = Path.home() / ".cache" / "cyber-scout" / "diagnostic-worker.lock"
 SAFETY_PORTS = {
@@ -192,22 +193,30 @@ def execute_scan(store: InventoryStore, job: dict) -> None:
 
 
 def run_worker(database_path: str | Path = DEFAULT_DATABASE) -> int:
+    logger = runtime_logger("worker")
     WORKER_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with WORKER_LOCK.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            logger.info("worker already running")
             return 0
         with InventoryStore(database_path) as store:
+            logger.info("worker started")
             while True:
                 job = store.claim_next_diagnostic()
                 if job:
+                    logger.info("diagnostic started id=%s kind=%s", job["id"], job["kind"])
                     execute_job(store, job)
+                    logger.info("diagnostic finished id=%s", job["id"])
                     continue
                 scan = store.claim_next_scan()
                 if scan:
+                    logger.info("scan started id=%s trigger=%s", scan["id"], scan["trigger"])
                     execute_scan(store, scan)
+                    logger.info("scan finished id=%s", scan["id"])
                     continue
+                logger.info("worker stopped")
                 return 0
 
 

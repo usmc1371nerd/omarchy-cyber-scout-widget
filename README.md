@@ -48,6 +48,11 @@ python3 -B -m py_compile scanner.py cyber_scout/*.py
 python3 -B -m pytest -q -p no:cacheprovider tests
 ```
 
+Operational installation, configuration, logging, database recovery, optional
+user services, testing, release construction, and rollback are documented in
+[OPERATIONS.md](OPERATIONS.md). The optional services are never installed or
+enabled automatically.
+
 See [ROADMAP.md](ROADMAP.md) for stage status and
 [ARCHITECTURE.md](ARCHITECTURE.md) for discovery, identity, privilege, and
 visibility boundaries.

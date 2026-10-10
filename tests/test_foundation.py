@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import sqlite3
 
 from cyber_scout.config import ConfigManager, CyberScoutConfig
@@ -8,7 +10,9 @@ from cyber_scout.discovery import NeighborEventAdapter, NeighborTableAdapter
 from cyber_scout.diagnostics import explain_open_port, summarize_findings
 from cyber_scout.dashboard import dashboard_snapshot
 from cyber_scout.jobs import command_for, parse_result
-from cyber_scout import jobs
+from cyber_scout.maintenance import inspect_database, restore_database
+from cyber_scout import __version__, jobs
+from cyber_scout.runtime import runtime_logger
 from cyber_scout.scheduling import approved_local_scan_targets
 from cyber_scout.models import Observation, is_locally_administered, normalize_mac
 from cyber_scout.scope import current_ipv4_scopes
@@ -19,6 +23,11 @@ def test_mac_normalization_and_randomized_detection() -> None:
     assert normalize_mac("not-a-mac") is None
     assert is_locally_administered("02:00:00:00:00:01")
     assert not is_locally_administered("00:11:22:33:44:55")
+
+
+def test_package_and_plugin_versions_match() -> None:
+    manifest = json.loads((Path(__file__).parent.parent / "manifest.json").read_text())
+    assert __version__ == manifest["version"]
 
 
 def test_exact_mac_deduplicates_and_records_ip_change(tmp_path) -> None:
@@ -82,6 +91,77 @@ def test_schema_migration_is_idempotent(tmp_path) -> None:
         version = store.connection.execute("PRAGMA user_version").fetchone()[0]
         assert version == SCHEMA_VERSION
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_consistent_backup_and_validated_restore(tmp_path) -> None:
+    path = tmp_path / "inventory.db"
+    with InventoryStore(path) as store:
+        store.ingest(Observation(
+            "neighbor_table", "eth0", "192.168.1.20", "00:11:22:33:44:55", observed_at=100,
+        ))
+        backup = store.create_backup(reason="test")
+        store.ingest(Observation(
+            "neighbor_table", "eth0", "192.168.1.30", "00:11:22:33:44:66", observed_at=200,
+        ))
+    assert inspect_database(backup)["integrity"] == "ok"
+    result = restore_database(path, backup)
+    assert result["rollbackBackup"]
+    with InventoryStore(path) as restored:
+        assert restored.connection.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 1
+
+
+def test_corrupt_database_is_rejected_before_migration(tmp_path) -> None:
+    path = tmp_path / "inventory.db"
+    path.write_bytes(b"not sqlite")
+    try:
+        InventoryStore(path)
+    except (RuntimeError, sqlite3.DatabaseError):
+        pass
+    else:
+        raise AssertionError("corrupt database should be rejected")
+
+
+def test_restore_replaces_corrupt_database_and_preserves_it(tmp_path) -> None:
+    database = tmp_path / "inventory.db"
+    source = tmp_path / "known-good.db"
+    with InventoryStore(source) as store:
+        store.ingest(Observation(
+            "neighbor_table", "eth0", "10.0.0.20", "00:11:22:33:44:55", observed_at=100,
+        ))
+    database.write_bytes(b"corrupt inventory")
+    result = restore_database(database, source)
+    rollback = Path(result["rollbackBackup"])
+    assert rollback.read_bytes() == b"corrupt inventory"
+    assert inspect_database(database)["integrity"] == "ok"
+
+
+def test_runtime_logs_are_json_and_rotate(tmp_path) -> None:
+    logger = runtime_logger("rotation-test", tmp_path, max_bytes=256, backup_count=2)
+    for index in range(20):
+        logger.info("bounded event %s %s", index, "x" * 80)
+    for handler in logger.handlers:
+        handler.flush()
+        handler.close()
+    logger.handlers.clear()
+    logs = sorted(tmp_path.glob("rotation-test.jsonl*"))
+    assert 2 <= len(logs) <= 3
+    for line in logs[0].read_text().splitlines():
+        payload = json.loads(line)
+        assert payload["component"] == "cyber_scout.rotation-test"
+        assert payload["level"] == "info"
+    assert (tmp_path / "rotation-test.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+def test_user_service_templates_apply_security_and_resource_limits() -> None:
+    root = Path(__file__).parent.parent
+    for template in (root / "packaging" / "systemd").glob("*.service.in"):
+        content = template.read_text()
+        assert "NoNewPrivileges=yes" in content
+        assert "ProtectSystem=strict" in content
+        assert "MemoryMax=" in content
+        assert "CPUQuota=" in content
+        assert "LimitNOFILE=" in content
+        assert "UMask=0077" in content
 
 
 def test_newer_schema_is_rejected(tmp_path) -> None:

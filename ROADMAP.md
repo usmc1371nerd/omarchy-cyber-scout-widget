@@ -65,7 +65,7 @@ Deferred presentation refinement:
 - Sensor visibility/status reporting and mirrored-port limitations.
 - Packet payload storage remains disabled by default.
 
-## 🚧 Stage 7 — Hardening and packaging
+## ✅ Stage 7 — Hardening and packaging
 
 Completed:
 
@@ -73,10 +73,9 @@ Completed:
 - Loopback-only dashboard and current-network API scoping.
 - Local file permissions, WAL SQLite, indexes, retention, and input validation.
 - Graceful optional-tool failures and automated regression suite.
-
-Remaining:
-
 - Complete installation, configuration, security, testing, and rollback guides.
-- User-systemd units after explicit installation approval.
-- Structured log rotation, resource-limit verification, and migration recovery.
-- Broader fixtures, integration tests, and release packaging.
+- Reviewable user-systemd templates with explicit, opt-in installation only.
+- Bounded structured log rotation and declarative service resource limits.
+- Pre-migration backups, integrity verification, and validated atomic recovery.
+- Broader recovery and packaging tests plus clean-tree release archives and
+  checksums.

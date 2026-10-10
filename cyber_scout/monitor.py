@@ -15,6 +15,7 @@ from pathlib import Path
 from .config import ConfigManager
 from .database import DEFAULT_DATABASE, InventoryStore
 from .discovery import NeighborEventAdapter, PassiveDiscoveryManager
+from .runtime import runtime_logger
 from .scheduling import approved_local_scan_targets
 
 DEFAULT_LOCK = Path.home() / ".cache" / "cyber-scout" / "passive-monitor.lock"
@@ -41,13 +42,19 @@ def enqueue_due_scheduled_scans(store: InventoryStore, config, now: int | None =
 
 def run(*, once: bool = False, config_path: str | None = None, database_path: str | None = None) -> int:
     config = ConfigManager(config_path).load() if config_path else ConfigManager().load()
+    logger = runtime_logger("monitor")
+
+    def emit(value: dict) -> None:
+        print(json.dumps(value, separators=(",", ":")), flush=True)
+        logger.info(json.dumps(value, separators=(",", ":")))
+
     lock_path = DEFAULT_LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_path.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print(json.dumps({"status": "already_running"}))
+            emit({"status": "already_running"})
             return 2
         stopping = False
 
@@ -62,7 +69,7 @@ def run(*, once: bool = False, config_path: str | None = None, database_path: st
             result = manager.observe_once()
             result["retention"] = store.prune(config.retention_days)
             result["scheduledScansQueued"] = enqueue_due_scheduled_scans(store, config)
-            print(json.dumps(result, separators=(",", ":")), flush=True)
+            emit(result)
             if once:
                 return 0
 
@@ -86,7 +93,7 @@ def run(*, once: bool = False, config_path: str | None = None, database_path: st
                             if process.stdout is not None:
                                 selector.register(process.stdout, selectors.EVENT_READ)
                         except OSError as error:
-                            print(json.dumps({"source": "neighbor_event", "error": str(error)[:256]}), flush=True)
+                            emit({"source": "neighbor_event", "error": str(error)[:256]})
                             process = None
                             next_restart = now + 30
 
@@ -97,10 +104,10 @@ def run(*, once: bool = False, config_path: str | None = None, database_path: st
                             observation = NeighborEventAdapter.parse_line(line, int(time.time()))
                             if observation:
                                 device_id = store.ingest(observation)
-                                print(json.dumps({
+                                emit({
                                     "source": "neighbor_event", "observedAt": observation.observed_at,
                                     "assigned": bool(device_id), "state": observation.state,
-                                }, separators=(",", ":")), flush=True)
+                                })
                         elif process is not None:
                             selector.unregister(key.fileobj)
                             process.wait(timeout=1)
@@ -111,7 +118,7 @@ def run(*, once: bool = False, config_path: str | None = None, database_path: st
                         result = manager.observe_once()
                         result["retention"] = store.prune(config.retention_days)
                         result["scheduledScansQueued"] = enqueue_due_scheduled_scans(store, config)
-                        print(json.dumps(result, separators=(",", ":")), flush=True)
+                        emit(result)
                         next_snapshot = time.monotonic() + config.passive_interval_seconds
             finally:
                 selector.close()

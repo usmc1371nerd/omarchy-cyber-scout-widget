@@ -243,3 +243,17 @@ CIDRs. Devices from disconnected networks remain historical database evidence
 but are excluded from default counts, inventory, timelines, detail access, and
 JSON exports. Active scanning retains its separate private, approved-target
 restrictions and does not inherit this display-only scope.
+
+## Hardening and recovery
+
+Long-lived monitor, worker, and dashboard processes write bounded JSON-lines
+logs under `~/.local/state/cyber-scout`. Each component rotates at 1 MiB and
+retains three prior files. Optional user-service templates add process, file
+descriptor, memory, CPU, filesystem, namespace, and address-family limits.
+They are shipped as reviewable templates and are never installed implicitly.
+
+SQLite integrity is checked before and after migrations. Upgrading an existing
+older schema first creates a consistent backup through SQLite's backup API so
+WAL state is included. The offline maintenance command validates backups,
+creates a pre-restore rollback point, atomically replaces the database, and
+rejects corrupt or unsupported newer schemas.
