@@ -1,4 +1,4 @@
-"""Loopback-only, read-only Cyber Scout dashboard."""
+"""Loopback-only Cyber Scout dashboard with narrowly validated local writes."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import secrets
 import time
 from urllib.parse import parse_qs, urlsplit
 
 from .database import DEFAULT_DATABASE, InventoryStore
+from .config import DEFAULT_CONFIG, ConfigManager, CyberScoutConfig
 from .scope import current_ipv4_scopes
 
 HOST = "127.0.0.1"
@@ -17,20 +19,38 @@ PORT = 8765
 ASSET = Path(__file__).with_name("dashboard.html")
 
 
-def dashboard_snapshot(store: InventoryStore, now: int | None = None, networks: list[str] | None = None) -> dict:
+PERIODS = {"24h": 86400, "7d": 604800, "30d": 2592000}
+
+
+def dashboard_snapshot(store: InventoryStore, now: int | None = None, networks: list[str] | None = None,
+                       period: str = "24h", include_history: bool = False) -> dict:
     timestamp = int(now if now is not None else time.time())
     active_networks = networks if networks is not None else [item["network"] for item in current_ipv4_scopes()]
-    visible_ids = {item["id"] for item in store.list_devices(networks=active_networks, limit=1000)}
+    network_filter = None if include_history else active_networks
+    visible_ids = {item["id"] for item in store.list_devices(networks=network_filter, limit=1000)}
     changes: dict[str, int] = {}
-    for event in store.list_events(since=timestamp - 86400, until=timestamp, limit=1000):
+    seconds = PERIODS.get(period)
+    if seconds is None:
+        raise ValueError("Invalid change period")
+    for event in store.list_events(since=timestamp - seconds, until=timestamp, limit=1000):
         if event.get("device_id") not in visible_ids:
             continue
         changes[event["event_type"]] = changes.get(event["event_type"], 0) + 1
     return {
         "generatedAt": timestamp,
         "networks": active_networks,
-        "counts": store.counts_for_networks(active_networks, timestamp),
-        "changes24h": changes,
+        "counts": (store.counts_for_networks(active_networks, timestamp) if not include_history else {
+            "total": len(visible_ids),
+            "recently_active": sum((item["last_active"] or 0) >= timestamp - 900
+                                   for item in store.list_devices(limit=1000)),
+            "new_24h": sum(item["first_observed"] >= timestamp - 86400
+                           for item in store.list_devices(limit=1000)),
+            "unrecognized": sum(item["recognition"] == "unrecognized"
+                                for item in store.list_devices(limit=1000)),
+        }),
+        "period": period,
+        "changes": changes,
+        "changes24h": changes if period == "24h" else {},
     }
 
 
@@ -49,7 +69,10 @@ def _device_rows(store: InventoryStore, query: dict[str, list[str]], networks: l
     return devices
 
 
-def make_handler(database: Path | str = DEFAULT_DATABASE) -> type[BaseHTTPRequestHandler]:
+def make_handler(database: Path | str = DEFAULT_DATABASE,
+                 config_path: Path | str = DEFAULT_CONFIG) -> type[BaseHTTPRequestHandler]:
+    csrf_token = secrets.token_urlsafe(32)
+
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "CyberScout/1"
 
@@ -73,6 +96,16 @@ def make_handler(database: Path | str = DEFAULT_DATABASE) -> type[BaseHTTPReques
             self._headers(status, "application/json; charset=utf-8", length=len(body), download=download)
             self.wfile.write(body)
 
+        def _scope(self, query: dict[str, list[str]]) -> tuple[str, list[str] | None]:
+            scope = query.get("scope", ["current"])[0]
+            if scope not in {"current", "history"}:
+                raise ValueError("Invalid inventory scope")
+            networks = [item["network"] for item in current_ipv4_scopes()]
+            return scope, networks if scope == "current" else None
+
+        def _visible_ids(self, store: InventoryStore, networks: list[str] | None) -> set[str]:
+            return {item["id"] for item in store.list_devices(networks=networks, limit=1000)}
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             request = urlsplit(self.path)
             try:
@@ -87,46 +120,97 @@ def make_handler(database: Path | str = DEFAULT_DATABASE) -> type[BaseHTTPReques
                     self.wfile.write(body)
                     return
                 with InventoryStore(database) as store:
+                    query = parse_qs(request.query)
+                    scope, network_filter = self._scope(query)
                     networks = [item["network"] for item in current_ipv4_scopes()]
+                    visible_ids = self._visible_ids(store, network_filter)
+                    if request.path == "/api/session":
+                        self._json({"csrfToken": csrf_token, "settings": ConfigManager(config_path).load().to_mapping(),
+                                    "currentNetworks": networks})
+                        return
                     if request.path == "/api/overview":
-                        self._json(dashboard_snapshot(store, networks=networks))
+                        period = query.get("period", ["24h"])[0]
+                        snapshot = dashboard_snapshot(store, networks=networks, period=period,
+                                                      include_history=scope == "history")
+                        snapshot["scope"] = scope
+                        snapshot["networks"] = networks
+                        self._json(snapshot)
                         return
                     if request.path == "/api/devices":
-                        self._json({"networks": networks, "devices": _device_rows(store, parse_qs(request.query), networks)})
+                        self._json({"networks": networks, "scope": scope,
+                                    "devices": _device_rows(store, query, network_filter)})
                         return
                     if request.path == "/api/events":
-                        query = parse_qs(request.query)
                         since = int(query.get("since", [str(int(time.time()) - 604800)])[0])
-                        visible_ids = {item["id"] for item in store.list_devices(networks=networks, limit=1000)}
                         events = [item for item in store.list_events(since=since, limit=1000)
                                   if item.get("device_id") in visible_ids]
-                        self._json({"networks": networks, "events": events[:250]})
+                        state = query.get("state", ["open"])[0]
+                        if state == "open":
+                            events = [item for item in events if not item["dismissed_at"]]
+                        elif state != "all":
+                            raise ValueError("Invalid event state")
+                        self._json({"networks": networks, "scope": scope, "events": events[:250]})
                         return
                     if request.path.startswith("/api/devices/"):
                         device_id = request.path.removeprefix("/api/devices/")
                         if not device_id or "/" in device_id or len(device_id) > 64:
                             raise ValueError("Invalid device ID")
                         report = store.get_device_report(device_id)
-                        visible_ids = {item["id"] for item in store.list_devices(networks=networks, limit=1000)}
                         if device_id not in visible_ids:
-                            raise KeyError("Device is not on a currently attached network")
-                        if query := parse_qs(request.query):
-                            if query.get("download") == ["1"]:
-                                self._json(report, download=f"cyber-scout-device-{device_id}.json")
-                                return
+                            raise KeyError("Device is outside the selected inventory scope")
+                        if query.get("download") == ["1"]:
+                            self._json(report, download=f"cyber-scout-device-{device_id}.json")
+                            return
                         self._json({"device": report})
                         return
                     if request.path == "/api/export":
-                        visible = store.list_devices(networks=networks, limit=1000)
+                        visible = store.list_devices(networks=network_filter, limit=1000)
                         devices = [store.get_device_report(item["id"]) for item in visible]
                         self._json(
-                            {"exportedAt": int(time.time()), "networks": networks,
-                             "counts": store.counts_for_networks(networks), "devices": devices},
+                            {"exportedAt": int(time.time()), "scope": scope, "networks": networks,
+                             "devices": devices},
                             download="cyber-scout-inventory.json",
                         )
                         return
                 self._json({"error": "Not found"}, 404)
             except (KeyError, OSError, ValueError) as error:
+                self._json({"error": str(error)}, 400)
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+            try:
+                if self.headers.get("X-Cyber-Scout-Token") != csrf_token:
+                    self._json({"error": "Invalid dashboard session token"}, 403)
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    raise ValueError("Content-Type must be application/json")
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 65536:
+                    raise ValueError("Invalid request size")
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict):
+                    raise ValueError("Request body must be an object")
+                request = urlsplit(self.path)
+                if request.path.startswith("/api/events/"):
+                    parts = request.path.strip("/").split("/")
+                    if len(parts) != 4 or parts[:2] != ["api", "events"]:
+                        raise ValueError("Invalid event action")
+                    with InventoryStore(database) as store:
+                        self._json({"event": store.set_event_state(int(parts[2]), parts[3])})
+                    return
+                if request.path == "/api/settings":
+                    allowed = {"retention_days", "active_discovery_enabled", "approved_networks",
+                               "active_rate_limit", "active_timeout_seconds", "scheduled_scan_minutes"}
+                    if set(body) - allowed:
+                        raise ValueError("Unsupported setting")
+                    manager = ConfigManager(config_path)
+                    values = manager.load().to_mapping()
+                    values.update(body)
+                    config = CyberScoutConfig.from_mapping(values)
+                    manager.save(config)
+                    self._json({"settings": config.to_mapping()})
+                    return
+                self._json({"error": "Not found"}, 404)
+            except (json.JSONDecodeError, KeyError, OSError, ValueError) as error:
                 self._json({"error": str(error)}, 400)
 
         def log_message(self, _format: str, *_args: object) -> None:

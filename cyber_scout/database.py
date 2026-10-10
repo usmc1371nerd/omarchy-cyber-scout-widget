@@ -548,9 +548,9 @@ class InventoryStore:
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         rows = list(self.connection.execute(
             "SELECT d.* FROM devices d" + where + " ORDER BY d.last_observed DESC, d.id LIMIT ? OFFSET ?",
-            (*values, 1000 if networks else limit, 0 if networks else offset),
+            (*values, 1000 if networks is not None else limit, 0 if networks is not None else offset),
         ))
-        if networks:
+        if networks is not None:
             scopes = [ipaddress.ip_network(value, strict=True) for value in networks]
             visible = set()
             for row in self.connection.execute("SELECT device_id,address FROM addresses"):
@@ -602,6 +602,32 @@ class InventoryStore:
                 item["details"] = {}
             result.append(item)
         return result
+
+    def set_event_state(self, event_id: int, action: str, now: int | None = None) -> dict:
+        """Acknowledge, dismiss, or restore an event without changing its evidence."""
+        if action not in {"acknowledge", "dismiss", "restore"}:
+            raise ValueError("Invalid event action")
+        timestamp = int(now if now is not None else time.time())
+        row = self.connection.execute("SELECT id FROM events WHERE id = ?", (int(event_id),)).fetchone()
+        if not row:
+            raise KeyError("Event not found")
+        values = {
+            "acknowledge": (timestamp, None),
+            "dismiss": (None, timestamp),
+            "restore": (None, None),
+        }[action]
+        with self.connection:
+            self.connection.execute(
+                "UPDATE events SET acknowledged_at = ?, dismissed_at = ? WHERE id = ?",
+                (*values, int(event_id)),
+            )
+        row = self.connection.execute("SELECT * FROM events WHERE id = ?", (int(event_id),)).fetchone()
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item.pop("details_json"))
+        except (json.JSONDecodeError, TypeError):
+            item["details"] = {}
+        return item
 
     def change_summary(self, since: int, until: int | None = None) -> dict:
         end = int(until if until is not None else time.time())

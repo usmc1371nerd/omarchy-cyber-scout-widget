@@ -38,7 +38,7 @@ Status legend: ✅ complete · 🚧 in progress · ⬜ planned
 - Scheduled scan authorization gates implemented; scheduling remains disabled
   by default.
 
-## 🚧 Stage 5 — Full dashboard
+## ✅ Stage 5 — Full dashboard
 
 Completed:
 
@@ -47,14 +47,16 @@ Completed:
 - Evidence-backed device details, services, diagnostics, and events.
 - Per-device and current-inventory JSON downloads.
 - Security headers and no fixture data in production views.
-
-Remaining:
-
-- Settings UI and safely validated write endpoints.
+- Settings UI with token-protected, strictly validated local writes.
 - Security-center acknowledgement and dismissal controls.
-- Richer change-period selection, reporting, and trends.
-- Historical-inventory opt-in view clearly separated from current devices.
-- Local-host multi-interface presentation as one physical machine.
+- 24-hour, 7-day, and 30-day change periods.
+- Explicit historical-inventory opt-in, clearly separated from current devices.
+- Safe active-discovery controls with private-network approval gates.
+
+Deferred presentation refinement:
+
+- Grouping one physical local host across simultaneous interfaces remains a
+  future display enhancement; exact-MAC evidence continues to stay separate.
 
 ## ⬜ Stage 6 — Deep monitoring
 

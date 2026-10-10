@@ -418,3 +418,39 @@ def test_network_scoped_inventory_hides_previous_network(tmp_path) -> None:
         store.ingest(Observation("neighbor_table", "wlan0", "192.168.9.20", "00:11:22:33:44:66"))
         visible = store.list_devices(networks=["10.2.3.0/24"])
         assert [item["id"] for item in visible] == [current]
+
+
+def test_empty_current_scope_does_not_show_historical_devices(tmp_path) -> None:
+    with InventoryStore(tmp_path / "inventory.db") as store:
+        store.ingest(Observation("neighbor_table", "eth0", "10.2.3.20", "00:11:22:33:44:55"))
+        assert store.list_devices(networks=[]) == []
+        assert len(store.list_devices(networks=None)) == 1
+
+
+def test_event_acknowledge_dismiss_and_restore(tmp_path) -> None:
+    with InventoryStore(tmp_path / "inventory.db") as store:
+        store.ingest(Observation(
+            "neighbor_table", "eth0", "10.2.3.20", "00:11:22:33:44:55", observed_at=100,
+        ))
+        event_id = store.list_events()[0]["id"]
+        acknowledged = store.set_event_state(event_id, "acknowledge", now=200)
+        assert acknowledged["acknowledged_at"] == 200
+        assert acknowledged["dismissed_at"] is None
+        dismissed = store.set_event_state(event_id, "dismiss", now=300)
+        assert dismissed["acknowledged_at"] is None
+        assert dismissed["dismissed_at"] == 300
+        restored = store.set_event_state(event_id, "restore", now=400)
+        assert restored["acknowledged_at"] is None
+        assert restored["dismissed_at"] is None
+
+
+def test_dashboard_period_and_history_are_explicit(tmp_path) -> None:
+    with InventoryStore(tmp_path / "inventory.db") as store:
+        store.ingest(Observation(
+            "neighbor_table", "eth0", "10.2.3.20", "00:11:22:33:44:55", observed_at=100,
+        ))
+        current = dashboard_snapshot(store, now=200, networks=[], period="7d")
+        history = dashboard_snapshot(store, now=200, networks=[], period="7d", include_history=True)
+        assert current["counts"]["total"] == 0
+        assert history["counts"]["total"] == 1
+        assert history["period"] == "7d"
