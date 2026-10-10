@@ -85,6 +85,8 @@ class CyberScoutConfig:
         for path in (self.zeek_log_directory, self.suricata_eve_path):
             if "\x00" in path or len(path) > 4096:
                 raise ValueError("Invalid monitoring path")
+            if path and not Path(path).is_absolute():
+                raise ValueError("Monitoring paths must be absolute")
 
     def allows_target(self, value: str) -> bool:
         address = ipaddress.ip_address(value)

@@ -13,8 +13,10 @@ active diagnostics explicit, bounded, and limited to approved local targets.
   names, notes, services, and diagnostic history.
 - Queued ping, common-service, and selected safety-port checks.
 - Compact Omarchy/Quickshell interface with search and device actions.
-- Read-only dashboard on `http://127.0.0.1:8765` with current-device details,
-  timeline, search, filtering, and JSON exports.
+- Loopback-only dashboard on `http://127.0.0.1:8765` with current-device
+  details, timeline, search, filtering, JSON exports, and validated settings.
+- Optional Zeek JSON and Suricata EVE metadata ingestion with cursor tracking,
+  alert deduplication, source status, and explicit visibility limits.
 - Connection-aware public IP/ISP lookup that never presents a previous network's
   cached provider as current.
 - No telemetry, analytics, cloud account, packet payload storage, or remote bind.
@@ -39,6 +41,22 @@ explicit local discovery. Device diagnostics run only when selected. Use
 Runtime databases, caches, and user-specific observations are not stored in
 this repository.
 
+## Optional deep monitoring
+
+Cyber Scout does not install, start, or grant capture privileges to Zeek or
+Suricata. If either sensor is already configured, enter absolute paths in the
+dashboard settings:
+
+- Zeek JSON log directory containing `conn.log` and/or `notice.log`.
+- Suricata EVE JSON file, commonly `eve.json`.
+
+The monitor reads only appended complete JSON lines, caps work per cycle, and
+tracks inode and byte offsets across rotation. It stores connection/alert
+metadata from a strict allowlist; raw packets, printable payloads, HTTP bodies,
+and file content are discarded. A normal switched Ethernet or Wi-Fi host sees
+only traffic delivered to it. Full-LAN visibility requires a mirror port,
+network tap, or gateway-based sensor.
+
 ## Development
 
 The backend uses Python's standard library. Tests require `pytest`.
@@ -47,6 +65,11 @@ The backend uses Python's standard library. Tests require `pytest`.
 python3 -B -m py_compile scanner.py cyber_scout/*.py
 python3 -B -m pytest -q -p no:cacheprovider tests
 ```
+
+Operational installation, configuration, logging, database recovery, optional
+user services, testing, release construction, and rollback are documented in
+[OPERATIONS.md](OPERATIONS.md). The optional services are never installed or
+enabled automatically.
 
 See [ROADMAP.md](ROADMAP.md) for stage status and
 [ARCHITECTURE.md](ARCHITECTURE.md) for discovery, identity, privilege, and

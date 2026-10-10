@@ -243,3 +243,38 @@ CIDRs. Devices from disconnected networks remain historical database evidence
 but are excluded from default counts, inventory, timelines, detail access, and
 JSON exports. Active scanning retains its separate private, approved-target
 restrictions and does not inherit this display-only scope.
+
+### Deep-monitoring adapters
+
+Schema version 4 adds deduplicated sensor findings and durable per-path file
+cursors. The optional monitor adapter accepts Zeek JSON `conn.log` and
+`notice.log` records plus Suricata EVE `alert` and `flow` records. Reads are
+bounded to 2 MiB, 2,000 records, and 256 KiB per line for each source per
+cycle. Incomplete trailing lines wait for the next cycle, while inode changes
+and truncation reset the cursor safely for log rotation.
+
+Parsers construct stored metadata from explicit fields rather than copying
+source records. Packet payloads, printable payloads, request/response bodies,
+and file content therefore never enter SQLite. Sensor paths are optional,
+absolute, and validated; no sensor package, capture capability, service, or
+firewall rule is installed by Cyber Scout. Findings are correlated to an
+inventory device only when a recorded source or destination address matches.
+
+Zeek and Suricata visibility is always described as sensor-local. A regular
+switched Ethernet or Wi-Fi endpoint cannot observe arbitrary peer-to-peer LAN
+traffic. Full-LAN claims require an independently configured mirror port,
+network tap, gateway sensor, or equivalent observation point.
+
+## Hardening and recovery
+
+Long-lived monitor, worker, and dashboard processes write bounded JSON-lines
+logs under `~/.local/state/cyber-scout`. Each component rotates at 1 MiB and
+retains three prior files. Optional user-service templates add process, file
+descriptor, memory, CPU, filesystem, namespace, and address-family limits.
+They are shipped as reviewable templates and are never installed implicitly.
+
+SQLite integrity is checked before and after migrations. Upgrading an existing
+older schema first creates a consistent backup through SQLite's backup API so
+WAL state is included. The offline maintenance command validates backups,
+creates a pre-restore rollback point, atomically replaces the database, and
+rejects corrupt or unsupported newer schemas.

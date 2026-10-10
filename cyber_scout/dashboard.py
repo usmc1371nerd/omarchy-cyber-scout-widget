@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .database import DEFAULT_DATABASE, InventoryStore
 from .config import DEFAULT_CONFIG, ConfigManager, CyberScoutConfig
+from .runtime import runtime_logger
 from .scope import current_ipv4_scopes
 
 HOST = "127.0.0.1"
@@ -72,6 +73,7 @@ def _device_rows(store: InventoryStore, query: dict[str, list[str]], networks: l
 def make_handler(database: Path | str = DEFAULT_DATABASE,
                  config_path: Path | str = DEFAULT_CONFIG) -> type[BaseHTTPRequestHandler]:
     csrf_token = secrets.token_urlsafe(32)
+    logger = runtime_logger("dashboard")
 
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "CyberScout/1"
@@ -223,8 +225,8 @@ def make_handler(database: Path | str = DEFAULT_DATABASE,
             except (json.JSONDecodeError, KeyError, OSError, ValueError) as error:
                 self._json({"error": str(error)}, 400)
 
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
+        def log_message(self, message_format: str, *args: object) -> None:
+            logger.info(message_format, *args)
 
     return DashboardHandler
 
@@ -237,12 +239,15 @@ def main() -> int:
     if not 1024 <= args.port <= 65535:
         parser.error("port must be between 1024 and 65535")
     server = ThreadingHTTPServer((args.host, args.port), make_handler())
+    logger = runtime_logger("dashboard")
+    logger.info("dashboard listening on %s:%s", args.host, args.port)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        logger.info("dashboard stopped")
     return 0
 
 

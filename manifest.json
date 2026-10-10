@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "hackerdad.lan-devices",
   "name": "LAN Devices",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "author": "hackerdad",
-  "description": "Local network inventory with custom names, WAN details, and bounded safety checks",
+  "description": "Local network inventory with bounded diagnostics and optional Zeek/Suricata metadata",
   "kinds": [
     "bar-widget"
   ],

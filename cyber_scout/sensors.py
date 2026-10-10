@@ -38,7 +38,8 @@ def parse_zeek_json(data: dict) -> dict | None:
         return None
     record_type = "notice" if any(key in data for key in ("note", "msg", "sub")) else "connection"
     timestamp = _number(data.get("ts"), int(time.time()))
-    source_ip, destination_ip = data.get("id.orig_h"), data.get("id.resp_h")
+    source_ip = data.get("id.orig_h") or data.get("src")
+    destination_ip = data.get("id.resp_h") or data.get("dst")
     source_port, destination_port = data.get("id.orig_p"), data.get("id.resp_p")
     protocol = str(data.get("proto") or "").lower()
     if record_type == "notice":
@@ -131,8 +132,6 @@ class SensorLogIngestor:
                         break
                     if len(line) > MAX_LINE_BYTES:
                         result["parseErrors"] += 1
-                        if not line.endswith(b"\n"):
-                            stream.readline()
                         continue
                     if not line.endswith(b"\n") and stream.tell() >= metadata.st_size:
                         stream.seek(start)
@@ -155,12 +154,10 @@ class SensorLogIngestor:
             )
         except (OSError, ValueError) as error:
             result["error"] = str(error)[:512]
-            inode = 0
-            try:
-                inode = source.stat().st_ino
-            except OSError:
-                pass
-            self.store.update_sensor_cursor(str(source), sensor, inode, 0, error=result["error"])
+            previous = self.store.get_sensor_cursor(str(source))
+            inode = int(previous["inode"]) if previous else 0
+            offset = int(previous["offset"]) if previous else 0
+            self.store.update_sensor_cursor(str(source), sensor, inode, offset, error=result["error"])
         return result
 
     def ingest_configured(self, config) -> dict:

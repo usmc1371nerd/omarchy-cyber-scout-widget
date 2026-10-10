@@ -205,13 +205,17 @@ class InventoryStore:
             self.path.parent.chmod(0o700)
         except OSError:
             pass
+        database_existed = self.path.exists() and self.path.stat().st_size > 0
         self.connection = sqlite3.connect(self.path, timeout=5.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA synchronous = NORMAL")
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        if database_existed:
+            self.verify_integrity()
         self.migrate()
+        self.verify_integrity()
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -226,29 +230,62 @@ class InventoryStore:
     def close(self) -> None:
         self.connection.close()
 
+    def verify_integrity(self) -> None:
+        row = self.connection.execute("PRAGMA quick_check").fetchone()
+        result = str(row[0]) if row else "no result"
+        if result != "ok":
+            raise RuntimeError(f"Database integrity check failed: {result}")
+
+    def create_backup(self, *, reason: str = "manual", keep: int = 5) -> Path:
+        """Create a consistent SQLite backup without copying live WAL files."""
+        safe_reason = "".join(character for character in reason if character.isalnum() or character in "-_")[:32]
+        version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+        backup_directory = self.path.parent / "backups"
+        backup_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        backup_directory.chmod(0o700)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{time.time_ns() % 1_000_000_000:09d}"
+        destination = backup_directory / f"{self.path.stem}-{safe_reason or 'manual'}-v{version}-{stamp}.db"
+        temporary = destination.with_suffix(".tmp")
+        backup_connection = sqlite3.connect(temporary)
+        try:
+            self.connection.backup(backup_connection)
+        finally:
+            backup_connection.close()
+        temporary.chmod(0o600)
+        os.replace(temporary, destination)
+        backups = sorted(backup_directory.glob(f"{self.path.stem}-*.db"), key=lambda item: item.stat().st_mtime)
+        for expired in backups[:-max(1, keep)]:
+            expired.unlink()
+        return destination
+
     def migrate(self) -> None:
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
             raise RuntimeError(f"Database schema {version} is newer than supported {SCHEMA_VERSION}")
-        if version < 1:
-            with self.connection:
-                self.connection.executescript(MIGRATION_1)
-                self.connection.execute("PRAGMA user_version = 1")
-            version = 1
-        if version < 2:
-            with self.connection:
-                self.connection.executescript(MIGRATION_2)
-                self.connection.execute("PRAGMA user_version = 2")
-            version = 2
-        if version < 3:
-            with self.connection:
-                self.connection.executescript(MIGRATION_3)
-                self.connection.execute("PRAGMA user_version = 3")
-            version = 3
-        if version < 4:
-            with self.connection:
-                self.connection.executescript(MIGRATION_4)
-                self.connection.execute("PRAGMA user_version = 4")
+        backup = self.create_backup(reason="pre-migration") if 0 < version < SCHEMA_VERSION else None
+        try:
+            if version < 1:
+                with self.connection:
+                    self.connection.executescript(MIGRATION_1)
+                    self.connection.execute("PRAGMA user_version = 1")
+                version = 1
+            if version < 2:
+                with self.connection:
+                    self.connection.executescript(MIGRATION_2)
+                    self.connection.execute("PRAGMA user_version = 2")
+                version = 2
+            if version < 3:
+                with self.connection:
+                    self.connection.executescript(MIGRATION_3)
+                    self.connection.execute("PRAGMA user_version = 3")
+                version = 3
+            if version < 4:
+                with self.connection:
+                    self.connection.executescript(MIGRATION_4)
+                    self.connection.execute("PRAGMA user_version = 4")
+        except (OSError, sqlite3.Error) as error:
+            recovery = f" Restore the automatic backup at {backup}." if backup else ""
+            raise RuntimeError(f"Database migration failed.{recovery}") from error
 
     def _create_device(self, observation: Observation) -> str:
         device_id = str(uuid.uuid4())

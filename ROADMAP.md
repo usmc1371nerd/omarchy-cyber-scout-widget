@@ -58,14 +58,15 @@ Deferred presentation refinement:
 - Grouping one physical local host across simultaneous interfaces remains a
   future display enhancement; exact-MAC evidence continues to stay separate.
 
-## ⬜ Stage 6 — Deep monitoring
+## ✅ Stage 6 — Deep monitoring
 
-- Optional Zeek structured-log ingestion.
-- Optional Suricata EVE JSON ingestion and alert deduplication.
-- Sensor visibility/status reporting and mirrored-port limitations.
-- Packet payload storage remains disabled by default.
+- Optional, cursor-based Zeek JSON connection and notice ingestion.
+- Optional Suricata EVE alert/flow ingestion with stable alert deduplication.
+- Bounded per-cycle reads, incomplete-line handling, and log-rotation recovery.
+- Sensor status and findings in the dashboard with explicit visibility limits.
+- Metadata allowlists ensure packet and application payloads are never stored.
 
-## 🚧 Stage 7 — Hardening and packaging
+## ✅ Stage 7 — Hardening and packaging
 
 Completed:
 
@@ -73,10 +74,9 @@ Completed:
 - Loopback-only dashboard and current-network API scoping.
 - Local file permissions, WAL SQLite, indexes, retention, and input validation.
 - Graceful optional-tool failures and automated regression suite.
-
-Remaining:
-
 - Complete installation, configuration, security, testing, and rollback guides.
-- User-systemd units after explicit installation approval.
-- Structured log rotation, resource-limit verification, and migration recovery.
-- Broader fixtures, integration tests, and release packaging.
+- Reviewable user-systemd templates with explicit, opt-in installation only.
+- Bounded structured log rotation and declarative service resource limits.
+- Pre-migration backups, integrity verification, and validated atomic recovery.
+- Broader recovery and packaging tests plus clean-tree release archives and
+  checksums.
